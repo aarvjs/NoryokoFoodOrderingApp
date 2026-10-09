@@ -1,0 +1,465 @@
+import 'cart_item.dart';
+import 'food_item.dart';
+import 'address.dart';
+
+class Order {
+  final String id;
+  final String orderNumber;
+  final String restaurantId;
+  final String branchId;
+  final String branchName;
+  final String restaurantName;
+  final String customerId;
+  final String customerName;
+  final String customerPhone;
+  final String customerAddress;
+  final Address? deliveryAddress;
+  final List<CartItem> items;
+  final double subtotal;
+  final double tax;
+  final double taxPercentage;
+  final double deliveryFee;
+  final double packagingCharge;
+  final double deliveryDistanceKm;
+  final double discount;
+  final double totalAmount;
+  final int rewardPointsUsed;
+  final double rewardDiscountAmount;
+  final String? rewardTransactionId;
+  final String? rewardBranchId;
+  final String? branchGstNumber;
+  final String? branchFssaiNumber;
+  final String paymentMethod; // "CASH_ON_DELIVERY", "COD", "ONLINE"
+  final String paymentGateway; // "RAZORPAY", "COD"
+  final String paymentStatus; // "PENDING", "COD_PENDING", "SUCCESS", "PAID"
+  final String? transactionId;
+  final DateTime? paidAt;
+  final String orderType; // "DELIVERY", "TAKE_AWAY"
+  final bool hiddenForUser;
+  final String status; // "PENDING", "ACCEPTED", "PREPARING", "READY", "OUT_FOR_DELIVERY", "DELIVERED", "REJECTED", "CANCELLED"
+  final int? estimatedPrepMinutes;
+  final String? rejectionReason;
+  final String? cancelledBy;
+  final String? cancellationReason;
+  final String? cancellationNote;
+  final DateTime? cancelledAt;
+  final DateTime orderDate;
+  final String? refundStatus; // "REFUNDED", "REFUND_PENDING", "NO_REFUND", "PROCESSING", "FAILED"
+  final double? refundAmount;
+  final DateTime? refundDate;
+  final String? refundId;
+  final String? refundMessage;
+
+  const Order({
+    required this.id,
+    this.orderNumber = '',
+    required this.restaurantId,
+    this.branchId = '',
+    this.branchName = '',
+    required this.restaurantName,
+    this.customerId = '',
+    this.customerName = '',
+    this.customerPhone = '',
+    this.customerAddress = '',
+    this.deliveryAddress,
+    required this.items,
+    this.subtotal = 0.0,
+    this.tax = 0.0,
+    this.taxPercentage = 0.0,
+    this.deliveryFee = 0.0,
+    this.packagingCharge = 0.0,
+    this.deliveryDistanceKm = 0.0,
+    this.discount = 0.0,
+    required this.totalAmount,
+    this.rewardPointsUsed = 0,
+    this.rewardDiscountAmount = 0.0,
+    this.rewardTransactionId,
+    this.rewardBranchId,
+    this.branchGstNumber,
+    this.branchFssaiNumber,
+    required this.paymentMethod,
+    this.paymentGateway = 'COD',
+    this.paymentStatus = 'PENDING',
+    this.transactionId,
+    this.paidAt,
+    this.orderType = 'DELIVERY',
+    this.hiddenForUser = false,
+    required this.status,
+    this.estimatedPrepMinutes,
+    this.rejectionReason,
+    this.cancelledBy,
+    this.cancellationReason,
+    this.cancellationNote,
+    this.cancelledAt,
+    required this.orderDate,
+    this.refundStatus,
+    this.refundAmount,
+    this.refundDate,
+    this.refundId,
+    this.refundMessage,
+  });
+
+  bool get isTakeAway => orderType.toUpperCase() == 'TAKE_AWAY';
+  bool get isDelivery => !isTakeAway;
+
+
+  /// Map raw status code to active timeline step index
+  /// 0: Placed / Pending
+  /// 1: Accepted / Preparing
+  /// 2: Ready / Out for Delivery
+  /// 3: Delivered
+  int get activeStep {
+    final upper = status.toUpperCase();
+    if (upper == 'PENDING') return 0;
+    if (upper == 'ACCEPTED') return 1;
+    if (upper == 'PREPARING') return 2;
+    if (upper == 'READY') return 3;
+    if (upper == 'OUT_FOR_DELIVERY') return 4;
+    if (upper == 'DELIVERED' || upper == 'COMPLETED') return 5;
+    return 0; // Default for REJECTED/CANCELLED
+  }
+
+  bool get isOngoing =>
+      (status.toUpperCase() == 'PENDING' ||
+       status.toUpperCase() == 'ACCEPTED' ||
+       status.toUpperCase() == 'PREPARING' ||
+       status.toUpperCase() == 'READY' ||
+       status.toUpperCase() == 'OUT_FOR_DELIVERY' ||
+       status.toUpperCase() == 'ONGOING') &&
+      !isCancelled &&
+      !isCompleted;
+
+  bool get isCompleted =>
+      status.toUpperCase() == 'DELIVERED' || status.toUpperCase() == 'COMPLETED';
+
+  bool get isCancelled =>
+      status.toUpperCase() == 'CANCELLED' ||
+      status.toUpperCase() == 'REJECTED';
+
+  bool get isCancellable => isOngoing && !isCompleted && !isCancelled;
+
+  bool get isProcessing =>
+      status.toUpperCase() == 'PREPARING' ||
+      status.toUpperCase() == 'READY' ||
+      status.toUpperCase() == 'OUT_FOR_DELIVERY';
+
+  bool get isOnlinePaid =>
+      (paymentMethod.toUpperCase() == 'ONLINE' || paymentGateway.toUpperCase() == 'RAZORPAY') &&
+      (paymentStatus.toUpperCase() == 'SUCCESS' || paymentStatus.toUpperCase() == 'PAID');
+
+  String get displayRefundStatus {
+    final statusUpper = refundStatus?.toUpperCase();
+    if (statusUpper == 'REFUNDED') return 'REFUNDED';
+    if (statusUpper == 'FAILED') return 'FAILED';
+    if (statusUpper == 'NOT_APPLICABLE' || statusUpper == 'NO_REFUND') return 'NOT_APPLICABLE';
+    if (statusUpper == 'PROCESSING' || statusUpper == 'PENDING' || statusUpper == 'REFUND_PENDING') {
+      return 'PROCESSING';
+    }
+
+    if (isCancelled) {
+      return isOnlinePaid ? 'PROCESSING' : 'NOT_APPLICABLE';
+    }
+    return 'NOT_APPLICABLE';
+  }
+
+  String get displayRefundStatusLabel {
+    final s = displayRefundStatus;
+    if (s == 'REFUNDED') return 'Refunded';
+    if (s == 'FAILED') return 'Refund Failed';
+    if (s == 'PROCESSING') return 'Refund Processing';
+    return 'Not Applicable';
+  }
+
+  String get customerRefundNotice {
+    final s = displayRefundStatus;
+    if (s == 'REFUNDED') {
+      return 'Your refund of ₹${(refundAmount ?? totalAmount).toStringAsFixed(2)} has been completed successfully.';
+    }
+    if (s == 'FAILED') {
+      return 'Refund processing failed. Please contact customer support for assistance.';
+    }
+    if (s == 'PROCESSING') {
+      if (refundMessage != null && refundMessage!.isNotEmpty) {
+        return refundMessage!;
+      }
+      return 'Your refund of ₹${(refundAmount ?? totalAmount).toStringAsFixed(2)} has been initiated. It may take 2–4 business days to reflect in your original payment method.';
+    }
+    return '';
+  }
+
+  factory Order.fromFirestore(Map<String, dynamic> data, String docId) {
+    final rawItems = data['items'] as List? ?? [];
+    final List<CartItem> parsedItems = rawItems.map((itemMap) {
+      if (itemMap is Map<String, dynamic>) {
+        final food = FoodItem(
+          id: (itemMap['productId'] ?? itemMap['id'] ?? '').toString(),
+          name: (itemMap['productName'] ?? itemMap['name'] ?? 'Item').toString(),
+          description: '',
+          imageUrl: (itemMap['image'] ?? '').toString(),
+          price: _numToDouble(itemMap['price']),
+          rating: 4.5,
+          reviewCount: 10,
+          isVeg: true,
+          ingredients: const [],
+          nutrition: const {},
+          reviews: const [],
+          category: 'General',
+        );
+        final qty = (itemMap['quantity'] is num) ? (itemMap['quantity'] as num).toInt() : 1;
+        final baseP = _numToDouble(itemMap['basePrice'] ?? itemMap['price']);
+        final unitP = _numToDouble(itemMap['unitPrice'] ?? itemMap['price']);
+        final rawCustoms = itemMap['customizations'] as List? ?? itemMap['selectedCustomizations'] as List? ?? [];
+        final List<String> parsedCustoms = rawCustoms.map((e) => e.toString()).toList();
+
+        final rawSelections = itemMap['customizationSelections'] as List? ?? [];
+        final List<ComboCustomizationSelection> parsedSelections = [];
+        for (final s in rawSelections) {
+          if (s is Map) {
+            parsedSelections.add(ComboCustomizationSelection.fromMap(Map<String, dynamic>.from(s)));
+          }
+        }
+
+        String? parsedSize;
+        if (itemMap['selectedVariant'] != null) {
+          if (itemMap['selectedVariant'] is Map) {
+            parsedSize = itemMap['selectedVariant']['name']?.toString();
+          } else if (itemMap['selectedVariant'] is String) {
+            parsedSize = itemMap['selectedVariant'].toString();
+          }
+        }
+        parsedSize ??= itemMap['size']?.toString();
+
+        return CartItem(
+          foodItem: food,
+          quantity: qty,
+          selectedSize: parsedSize,
+          basePrice: baseP,
+          unitPrice: unitP,
+          restaurantId: (data['restaurantId'] ?? '').toString(),
+          restaurantName: (data['restaurantName'] ?? data['branchName'] ?? '').toString(),
+          isCombo: itemMap['isCombo'] == true || itemMap['itemType'] == 'combo',
+          comboId: itemMap['comboId']?.toString(),
+          comboName: itemMap['comboName']?.toString(),
+          comboItemId: itemMap['comboItemId']?.toString(),
+          removedItems: (itemMap['removedItems'] as List?)?.map((e) => e.toString()).toList() ?? [],
+          replacements: (itemMap['replacements'] as List?)?.map((e) => e.toString()).toList() ?? [],
+          selectedAddons: (itemMap['selectedAddons'] as List?)?.map((e) => e.toString()).toList() ?? [],
+          selectedCustomizations: parsedCustoms,
+          customizationSelections: parsedSelections,
+        );
+      }
+      return CartItem(
+        foodItem: const FoodItem(
+          id: 'item',
+          name: 'Food Item',
+          description: '',
+          imageUrl: '',
+          price: 0,
+          rating: 4.5,
+          reviewCount: 0,
+          isVeg: true,
+          ingredients: [],
+          nutrition: {},
+          reviews: [],
+          category: '',
+        ),
+        quantity: 1,
+        unitPrice: 0.0,
+        restaurantId: '',
+        restaurantName: '',
+      );
+    }).toList().cast<CartItem>();
+
+    DateTime parsedDate = DateTime.now();
+    if (data['createdAt'] != null) {
+      if (data['createdAt'] is String) {
+        parsedDate = DateTime.tryParse(data['createdAt']) ?? DateTime.now();
+      } else if (data['createdAt'] is Map && data['createdAt']['seconds'] != null) {
+        parsedDate = DateTime.fromMillisecondsSinceEpoch(
+            (data['createdAt']['seconds'] as int) * 1000);
+      }
+    }
+
+    final String addrStr = (data['customerAddress'] ?? data['deliveryAddress'] ?? '').toString();
+
+    return Order(
+      id: docId,
+      orderNumber: (data['orderNumber'] ?? docId).toString(),
+      restaurantId: (data['restaurantId'] ?? '').toString(),
+      branchId: (data['branchId'] ?? '').toString(),
+      branchName: (data['branchName'] ?? 'Branch').toString(),
+      restaurantName: (data['restaurantName'] ?? data['branchName'] ?? 'Restaurant').toString(),
+      customerId: (data['customerId'] ?? data['userId'] ?? '').toString(),
+      customerName: (data['customerName'] ?? 'Customer').toString(),
+      customerPhone: (data['customerPhone'] ?? '').toString(),
+      customerAddress: addrStr,
+      deliveryAddress: Address(
+        id: 'addr_order',
+        label: 'Delivery Address',
+        addressLine: addrStr.isNotEmpty ? addrStr : 'User Address',
+        landmark: '',
+        city: 'City',
+        state: 'State',
+        zipCode: '',
+        isDefault: true,
+      ),
+      items: parsedItems,
+      subtotal: _numToDouble(data['subtotal']),
+      tax: _numToDouble(data['tax']),
+      taxPercentage: _numToDouble(data['taxPercentage'] ?? data['gstPercentage']),
+      deliveryFee: _numToDouble(data['deliveryFee'] ?? data['deliveryCharge']),
+      packagingCharge: _numToDouble(data['packagingCharge'] ?? data['packagingCharges'] ?? data['packagingFee']),
+
+      deliveryDistanceKm: _numToDouble(data['deliveryDistanceKm'] ?? data['distanceKm']),
+      discount: _numToDouble(data['discount']),
+      totalAmount: _numToDouble(data['totalAmount'] ?? data['grandTotal']),
+      rewardPointsUsed: (data['rewardPointsUsed'] is num)
+          ? (data['rewardPointsUsed'] as num).toInt()
+          : (int.tryParse(data['rewardPointsUsed']?.toString() ?? '0') ?? 0),
+      rewardDiscountAmount: _numToDouble(data['rewardDiscountAmount']),
+      rewardTransactionId: data['rewardTransactionId']?.toString(),
+      rewardBranchId: data['rewardBranchId']?.toString(),
+      branchGstNumber: (data['branchGstNumber'] ?? data['gstNumber'] ?? '').toString(),
+      branchFssaiNumber: (data['branchFssaiNumber'] ?? data['fssaiNumber'] ?? data['fssai'] ?? '').toString(),
+      paymentMethod: (data['paymentMethod'] ?? 'CASH_ON_DELIVERY').toString(),
+      paymentGateway: (data['paymentGateway'] ?? (data['paymentMethod'] == 'ONLINE' ? 'RAZORPAY' : 'COD')).toString(),
+      paymentStatus: (data['paymentStatus'] ?? 'PENDING').toString(),
+      transactionId: data['transactionId']?.toString(),
+      paidAt: data['paidAt'] != null
+          ? (data['paidAt'] is String
+              ? DateTime.tryParse(data['paidAt'])
+              : (data['paidAt'] is Map && data['paidAt']['seconds'] != null
+                  ? DateTime.fromMillisecondsSinceEpoch((data['paidAt']['seconds'] as int) * 1000)
+                  : null))
+          : null,
+      orderType: (data['orderType'] ?? 'DELIVERY').toString().toUpperCase() == 'TAKE_AWAY'
+          ? 'TAKE_AWAY'
+          : ((data['orderType'] ?? 'DELIVERY').toString().toUpperCase() == 'TAKEAWAY' ? 'TAKE_AWAY' : 'DELIVERY'),
+      hiddenForUser: data['hiddenForUser'] == true,
+      status: (data['status'] ?? 'PENDING').toString(),
+      estimatedPrepMinutes: data['estimatedPrepMinutes'] != null
+          ? (data['estimatedPrepMinutes'] as num).toInt()
+          : null,
+      rejectionReason: data['rejectionReason']?.toString(),
+      cancelledBy: data['cancelledBy']?.toString(),
+      cancellationReason: data['cancellationReason']?.toString(),
+      cancellationNote: data['cancellationNote']?.toString(),
+      cancelledAt: data['cancelledAt'] != null
+          ? (data['cancelledAt'] is String
+              ? DateTime.tryParse(data['cancelledAt'])
+              : (data['cancelledAt'] is Map && data['cancelledAt']['seconds'] != null
+                  ? DateTime.fromMillisecondsSinceEpoch((data['cancelledAt']['seconds'] as int) * 1000)
+                  : null))
+          : null,
+      orderDate: parsedDate,
+      refundStatus: data['refundStatus']?.toString(),
+      refundAmount: data['refundAmount'] != null ? _numToDouble(data['refundAmount']) : null,
+      refundDate: data['refundDate'] != null
+          ? (data['refundDate'] is String
+              ? DateTime.tryParse(data['refundDate'])
+              : (data['refundDate'] is Map && data['refundDate']['seconds'] != null
+                  ? DateTime.fromMillisecondsSinceEpoch((data['refundDate']['seconds'] as int) * 1000)
+                  : null))
+          : null,
+      refundId: data['refundId']?.toString() ?? data['refundTxnId']?.toString(),
+      refundMessage: data['refundMessage']?.toString(),
+    );
+  }
+
+  static double _numToDouble(dynamic val) {
+    if (val is num) return val.toDouble();
+    if (val != null) {
+      final parsed = double.tryParse(val.toString());
+      if (parsed != null) return parsed;
+    }
+    return 0.0;
+  }
+
+  Order copyWith({
+    String? id,
+    String? orderNumber,
+    String? restaurantId,
+    String? branchId,
+    String? branchName,
+    String? restaurantName,
+    String? customerId,
+    String? customerName,
+    String? customerPhone,
+    String? customerAddress,
+    Address? deliveryAddress,
+    List<CartItem>? items,
+    double? subtotal,
+    double? tax,
+    double? deliveryFee,
+    double? discount,
+    double? totalAmount,
+    int? rewardPointsUsed,
+    double? rewardDiscountAmount,
+    String? rewardTransactionId,
+    String? rewardBranchId,
+    String? paymentMethod,
+    String? paymentGateway,
+    String? paymentStatus,
+    String? transactionId,
+    DateTime? paidAt,
+    String? orderType,
+    bool? hiddenForUser,
+    String? status,
+    int? estimatedPrepMinutes,
+    String? rejectionReason,
+    String? cancelledBy,
+    String? cancellationReason,
+    String? cancellationNote,
+    DateTime? cancelledAt,
+    DateTime? orderDate,
+    String? refundStatus,
+    double? refundAmount,
+    DateTime? refundDate,
+    String? refundId,
+    String? refundMessage,
+  }) {
+    return Order(
+      id: id ?? this.id,
+      orderNumber: orderNumber ?? this.orderNumber,
+      restaurantId: restaurantId ?? this.restaurantId,
+      branchId: branchId ?? this.branchId,
+      branchName: branchName ?? this.branchName,
+      restaurantName: restaurantName ?? this.restaurantName,
+      customerId: customerId ?? this.customerId,
+      customerName: customerName ?? this.customerName,
+      customerPhone: customerPhone ?? this.customerPhone,
+      customerAddress: customerAddress ?? this.customerAddress,
+      deliveryAddress: deliveryAddress ?? this.deliveryAddress,
+      items: items ?? this.items,
+      subtotal: subtotal ?? this.subtotal,
+      tax: tax ?? this.tax,
+      deliveryFee: deliveryFee ?? this.deliveryFee,
+      discount: discount ?? this.discount,
+      totalAmount: totalAmount ?? this.totalAmount,
+      rewardPointsUsed: rewardPointsUsed ?? this.rewardPointsUsed,
+      rewardDiscountAmount: rewardDiscountAmount ?? this.rewardDiscountAmount,
+      rewardTransactionId: rewardTransactionId ?? this.rewardTransactionId,
+      rewardBranchId: rewardBranchId ?? this.rewardBranchId,
+      paymentMethod: paymentMethod ?? this.paymentMethod,
+      paymentGateway: paymentGateway ?? this.paymentGateway,
+      paymentStatus: paymentStatus ?? this.paymentStatus,
+      transactionId: transactionId ?? this.transactionId,
+      paidAt: paidAt ?? this.paidAt,
+      orderType: orderType ?? this.orderType,
+      hiddenForUser: hiddenForUser ?? this.hiddenForUser,
+      status: status ?? this.status,
+      estimatedPrepMinutes: estimatedPrepMinutes ?? this.estimatedPrepMinutes,
+      cancelledBy: cancelledBy ?? this.cancelledBy,
+      cancellationReason: cancellationReason ?? this.cancellationReason,
+      cancellationNote: cancellationNote ?? this.cancellationNote,
+      cancelledAt: cancelledAt ?? this.cancelledAt,
+      orderDate: orderDate ?? this.orderDate,
+      refundStatus: refundStatus ?? this.refundStatus,
+      refundAmount: refundAmount ?? this.refundAmount,
+      refundDate: refundDate ?? this.refundDate,
+      refundId: refundId ?? this.refundId,
+      refundMessage: refundMessage ?? this.refundMessage,
+    );
+  }
+}
+

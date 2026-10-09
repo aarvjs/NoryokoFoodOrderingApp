@@ -1,0 +1,512 @@
+import 'dart:math';
+import 'package:flutter/foundation.dart';
+import 'package:cloud_firestore/cloud_firestore.dart' hide Order;
+import '../../models/order.dart';
+import '../../models/cart_item.dart';
+import '../../features/rewards/repositories/reward_repository.dart';
+
+class OrderRepository {
+
+  final FirebaseFirestore _firestore = FirebaseFirestore.instance;
+  static const String _collectionName = 'orders';
+
+  /// Stream real-time orders for a specific customer
+  Stream<List<Order>> streamCustomerOrders(String customerId) {
+    if (customerId.isEmpty) {
+      // Fallback: Listen to all recent orders ordered by createdAt desc
+      return _firestore
+          .collection(_collectionName)
+          .snapshots()
+          .map((snapshot) {
+        final list = snapshot.docs
+            .map((doc) => Order.fromFirestore(doc.data(), doc.id))
+            .toList();
+        list.sort((a, b) => b.orderDate.compareTo(a.orderDate));
+        return list;
+      });
+    }
+
+    return _firestore
+        .collection(_collectionName)
+        .where('customerId', isEqualTo: customerId)
+        .snapshots()
+        .map((snapshot) {
+      final list = snapshot.docs
+          .map((doc) => Order.fromFirestore(doc.data(), doc.id))
+          .toList();
+      list.sort((a, b) => b.orderDate.compareTo(a.orderDate));
+      return list;
+    });
+  }
+
+  /// Create a new Order document in Firestore
+  Future<Order> createOrder({
+    required String restaurantId,
+    required String branchId,
+    required String branchName,
+    required String restaurantName,
+    required String customerId,
+    required String customerName,
+    required String customerPhone,
+    required String customerAddress,
+    double latitude = 0.0,
+    double longitude = 0.0,
+    required List<CartItem> items,
+    required double subtotal,
+    required double tax,
+    double taxPercentage = 0.0,
+    required double deliveryFee,
+    double packagingCharge = 0.0,
+    double deliveryDistanceKm = 0.0,
+    required double discount,
+    required double grandTotal,
+    int rewardPointsUsed = 0,
+    double rewardDiscountAmount = 0.0,
+    String? rewardTransactionId,
+    String? rewardBranchId,
+    String paymentMethod = 'CASH_ON_DELIVERY',
+    String paymentGateway = 'COD',
+    String paymentStatus = 'PENDING',
+    String? transactionId,
+    String? paidAt,
+    String? appliedCoupon,
+    String? appliedOfferId,
+    String? branchGstNumber,
+    String? branchFssaiNumber,
+    String orderType = 'DELIVERY',
+  }) async {
+    // Idempotency check: prevent duplicate orders for the same transaction ID
+    if (transactionId != null && transactionId.isNotEmpty) {
+      final existingSnap = await _firestore
+          .collection(_collectionName)
+          .where('transactionId', isEqualTo: transactionId)
+          .get();
+      if (existingSnap.docs.isNotEmpty) {
+        final doc = existingSnap.docs.first;
+        return Order.fromFirestore(doc.data(), doc.id);
+      }
+    }
+
+    final docRef = _firestore.collection(_collectionName).doc();
+    final nowIso = DateTime.now().toIso8601String();
+    final randomNum = Random().nextInt(900000) + 100000;
+    final orderNum = 'ORD-$randomNum';
+
+    // 1. Process atomic reward redemption if points were applied
+    String? generatedRewardTxId = rewardTransactionId;
+    if (rewardPointsUsed > 0 && customerId.isNotEmpty) {
+      try {
+        final rewardRepo = RewardRepository(firestore: _firestore);
+        generatedRewardTxId = await rewardRepo.redeemRewardPoints(
+          userId: customerId,
+          orderId: docRef.id,
+          orderNumber: orderNum,
+          pointsToRedeem: rewardPointsUsed,
+          monetaryValue: rewardDiscountAmount,
+          restaurantId: restaurantId,
+          branchId: branchId.isNotEmpty ? branchId : restaurantId,
+          branchName: branchName.isNotEmpty ? branchName : restaurantName,
+        );
+      } catch (e) {
+        debugPrint('[OrderRepository] Reward redemption error: $e');
+        rethrow;
+      }
+    }
+
+    final int totalQuantity = items.fold<int>(0, (total, i) => total + i.quantity);
+
+    final orderItemsData = items.map((item) {
+      final double displayBase = item.displayBasePrice;
+      final double totalItemP = item.totalPrice;
+
+      return {
+        'itemType': item.isCombo ? 'combo' : 'product',
+        'productId': item.foodItem.id,
+        'productName': item.foodItem.name,
+        'quantity': item.quantity,
+        'price': item.unitPrice,
+        'basePrice': displayBase,
+        'unitPrice': item.unitPrice,
+        'totalPrice': totalItemP,
+        'itemTotal': totalItemP,
+        'image': item.foodItem.imageUrl,
+        'category': item.foodItem.category,
+        'isCombo': item.isCombo,
+        if (item.comboId != null) 'comboId': item.comboId,
+        if (item.comboName != null) 'comboName': item.comboName,
+        if (item.comboItemId != null) 'comboItemId': item.comboItemId,
+        if (item.selectedSize != null)
+          'selectedVariant': {
+            'name': item.selectedSize,
+            'additionalPrice': 0,
+          },
+        if (item.selectedSize != null) 'size': item.selectedSize,
+        'removedItems': item.removedItems,
+        'replacements': item.replacements,
+        'selectedAddons': item.selectedAddons,
+        'customizations': [
+          if (item.customInstructions != null) item.customInstructions!,
+          ...item.selectedCustomizations,
+          if (item.removedItems.isNotEmpty) 'Removed: ${item.removedItems.join(", ")}',
+          if (item.replacements.isNotEmpty) 'Replacements: ${item.replacements.join(", ")}',
+          if (item.selectedAddons.isNotEmpty) 'Addons: ${item.selectedAddons.join(", ")}',
+        ],
+        'customizationSelections': item.customizationSelections.map((c) => c.toMap()).toList(),
+      };
+    }).toList();
+
+    final finalPaymentStatus = paymentStatus != 'PENDING'
+        ? paymentStatus
+        : (paymentMethod == 'ONLINE' ? 'SUCCESS' : 'COD_PENDING');
+
+    final orderData = {
+      'id': docRef.id,
+      'orderNumber': orderNum,
+      'restaurantId': restaurantId,
+      'branchId': branchId.isNotEmpty ? branchId : restaurantId,
+      'branchName': branchName.isNotEmpty ? branchName : restaurantName,
+      'restaurantName': restaurantName,
+      'customerId': customerId,
+      'customerName': customerName.isNotEmpty ? customerName : 'Customer',
+      'customerPhone': customerPhone.isNotEmpty ? customerPhone : '+91 9876543210',
+      'customerAddress': customerAddress,
+      'latitude': latitude,
+      'longitude': longitude,
+      'items': orderItemsData,
+      'quantity': totalQuantity,
+      'subtotal': subtotal,
+      'tax': tax,
+      'taxPercentage': taxPercentage,
+      'gstPercentage': taxPercentage,
+      'deliveryFee': deliveryFee,
+      'deliveryCharge': deliveryFee,
+      'packagingCharge': packagingCharge,
+      'packagingCharges': packagingCharge,
+      'deliveryDistanceKm': deliveryDistanceKm,
+      'distanceKm': deliveryDistanceKm,
+      'discount': discount,
+      'rewardPointsUsed': rewardPointsUsed,
+      'rewardDiscountAmount': rewardDiscountAmount,
+      'rewardTransactionId': generatedRewardTxId ?? '',
+      'rewardBranchId': rewardBranchId ?? (branchId.isNotEmpty ? branchId : restaurantId),
+      'appliedCoupon': appliedCoupon ?? '',
+      'appliedOfferId': appliedOfferId ?? '',
+      'offerConsumed': false,
+      'branchGstNumber': branchGstNumber ?? '',
+      'gstNumber': branchGstNumber ?? '',
+      'branchFssaiNumber': branchFssaiNumber ?? '',
+      'fssaiNumber': branchFssaiNumber ?? '',
+      'fssai': branchFssaiNumber ?? '',
+      'totalAmount': grandTotal,
+      'grandTotal': grandTotal,
+      'paymentMethod': paymentMethod,
+      'paymentGateway': paymentGateway,
+      'paymentStatus': finalPaymentStatus,
+      'transactionId': transactionId,
+      'paidAt': paidAt,
+      'orderType': orderType,
+      'hiddenForUser': false,
+      'status': 'PENDING',
+      'createdAt': nowIso,
+      'updatedAt': nowIso,
+    };
+
+    // Atomic transaction for offer redemption & usage limit enforcement
+    if ((appliedOfferId != null && appliedOfferId.isNotEmpty) || (appliedCoupon != null && appliedCoupon.isNotEmpty)) {
+      await _firestore.runTransaction((transaction) async {
+        DocumentSnapshot? offerSnap;
+        if (appliedOfferId != null && appliedOfferId.isNotEmpty) {
+          final oRef = _firestore.collection('offers').doc(appliedOfferId);
+          final snap = await transaction.get(oRef);
+          if (snap.exists) {
+            offerSnap = snap;
+          }
+        }
+
+        if (offerSnap == null && appliedCoupon != null && appliedCoupon.isNotEmpty) {
+          final qSnap = await _firestore.collection('offers').where('coupon', isEqualTo: appliedCoupon.trim().toUpperCase()).get();
+          if (qSnap.docs.isNotEmpty) {
+            final oRef = qSnap.docs.first.reference;
+            offerSnap = await transaction.get(oRef);
+          }
+        }
+
+        if (offerSnap != null && offerSnap.exists) {
+          final data = offerSnap.data() as Map<String, dynamic>;
+          final status = (data['status'] ?? 'ACTIVE').toString().toUpperCase();
+          final bool isActive = (data['isActive'] != false) && status == 'ACTIVE';
+
+          if (!isActive) {
+            throw Exception('Sorry, this offer is no longer active.');
+          }
+
+          final uLimit = (data['usageLimit'] ?? 0);
+          final int usageLimit = (uLimit is num) ? uLimit.toInt() : int.tryParse(uLimit.toString()) ?? 0;
+          final uCount = (data['usageCount'] ?? 0);
+          final int usageCount = (uCount is num) ? uCount.toInt() : int.tryParse(uCount.toString()) ?? 0;
+
+          if (usageLimit > 0 && usageCount >= usageLimit) {
+            throw Exception('Sorry, this offer has reached its usage limit.');
+          }
+
+          final mUsesUser = (data['maxUsesPerUser'] ?? 0);
+          final int maxUsesPerUser = (mUsesUser is num) ? mUsesUser.toInt() : int.tryParse(mUsesUser.toString()) ?? 0;
+          if (maxUsesPerUser > 0 && (customerId.isNotEmpty || customerPhone.isNotEmpty)) {
+            final Map<String, QueryDocumentSnapshot<Map<String, dynamic>>> docMap = {};
+
+            if (customerId.isNotEmpty) {
+              final snapById = await _firestore
+                  .collection('orders')
+                  .where('customerId', isEqualTo: customerId)
+                  .get();
+              for (final docSnap in snapById.docs) {
+                docMap[docSnap.id] = docSnap;
+              }
+            }
+
+            if (customerPhone.isNotEmpty) {
+              final snapByPhone = await _firestore
+                  .collection('orders')
+                  .where('customerPhone', isEqualTo: customerPhone)
+                  .get();
+              for (final docSnap in snapByPhone.docs) {
+                docMap[docSnap.id] = docSnap;
+              }
+            }
+
+            DateTime? parseOfferDate(dynamic val) {
+              if (val == null) return null;
+              if (val is String) return DateTime.tryParse(val);
+              if (val is Timestamp) return val.toDate();
+              if (val is num) return DateTime.fromMillisecondsSinceEpoch(val.toInt());
+              return null;
+            }
+
+            int userUsageCount = 0;
+            final offerDocId = offerSnap.id.trim();
+            final offerCoupon = (data['coupon'] ?? data['couponCode'] ?? '').toString().trim().toUpperCase();
+            final offerLastActivated = parseOfferDate(data['lastActivatedAt']);
+
+            for (final oDoc in docMap.values) {
+              final oData = oDoc.data();
+
+              // 1. If offer was reactivated, ignore orders placed before lastActivatedAt
+              final orderCreatedAt = parseOfferDate(oData['createdAt']);
+              if (offerLastActivated != null && orderCreatedAt != null) {
+                if (orderCreatedAt.isBefore(offerLastActivated)) {
+                  continue;
+                }
+              }
+
+              final oStatus = (oData['status'] ?? '').toString().toUpperCase();
+              final bool offerConsumed = oData['offerConsumed'] == true;
+
+              // 2. Offer is NOT consumed if order was cancelled/rejected before OUT_FOR_DELIVERY (offerConsumed != true)
+              if ((oStatus == 'CANCELLED' || oStatus == 'REJECTED') && !offerConsumed) {
+                continue;
+              }
+
+              final oAppliedOfferId = (oData['appliedOfferId'] ?? '').toString().trim();
+              final oAppliedCoupon = (oData['appliedCoupon'] ?? '').toString().trim().toUpperCase();
+
+              bool matches = false;
+              if (oAppliedOfferId.isNotEmpty && oAppliedOfferId == offerDocId) {
+                matches = true;
+              }
+              if (oAppliedCoupon.isNotEmpty) {
+                if (oAppliedCoupon == offerCoupon ||
+                    (appliedCoupon != null && oAppliedCoupon == appliedCoupon.trim().toUpperCase())) {
+                  matches = true;
+                }
+              }
+
+              if (matches) {
+                userUsageCount++;
+              }
+            }
+
+            if (userUsageCount >= maxUsesPerUser) {
+              throw Exception('You have already used this offer the maximum number of times.');
+            }
+          }
+
+          // Ensure appliedOfferId is correctly set on order document
+          orderData['appliedOfferId'] = offerSnap.id;
+        }
+
+        transaction.set(docRef, orderData);
+      });
+    } else {
+      await docRef.set(orderData);
+    }
+
+    // Create notifications for Super Admin and Branch Manager
+    try {
+      final notifRef = _firestore.collection('notifications').doc();
+      await notifRef.set({
+        'id': notifRef.id,
+        'orderId': docRef.id,
+        'branchId': orderData['branchId'],
+        'restaurantId': restaurantId,
+        'title': 'New Order Received! 🛍️',
+        'body': 'Order #$orderNum placed for ${orderData['branchName']}. Total: ₹$grandTotal',
+        'type': 'order_created',
+        'targetRole': 'BRANCH_MANAGER',
+        'read': false,
+        'createdAt': nowIso,
+      });
+    } catch (e) {
+      debugPrint('Order notification error: $e');
+    }
+
+    return Order.fromFirestore(orderData, docRef.id);
+  }
+
+  /// Cancel an active order with reason, optional note, and race condition check
+  Future<Map<String, dynamic>> cancelOrder({
+    required String orderId,
+    required String cancelledBy,
+    required String cancellationReason,
+    String? cancellationNote,
+  }) async {
+    try {
+      final docRef = _firestore.collection(_collectionName).doc(orderId);
+      final docSnap = await docRef.get();
+
+      if (!docSnap.exists) {
+        return {'success': false, 'message': 'Order not found.'};
+      }
+
+      final data = docSnap.data()!;
+      final currentStatus = (data['status'] ?? '').toString().toUpperCase();
+
+      if (currentStatus == 'CANCELLED') {
+        return {
+          'success': false,
+          'message': 'This order has already been cancelled.'
+        };
+      }
+
+      if (currentStatus == 'DELIVERED' || currentStatus == 'COMPLETED') {
+        return {
+          'success': false,
+          'message': 'Delivered or completed orders cannot be cancelled.'
+        };
+      }
+
+      final nowIso = DateTime.now().toIso8601String();
+      final Map<String, dynamic> updates = {
+        'status': 'CANCELLED',
+        'cancelledBy': cancelledBy,
+        'cancellationReason': cancellationReason,
+        'cancellationNote': cancellationNote ?? '',
+        'cancelledAt': nowIso,
+        'updatedAt': nowIso,
+      };
+
+      final payMethod = (data['paymentMethod'] ?? '').toString().toUpperCase();
+      final payGateway = (data['paymentGateway'] ?? '').toString().toUpperCase();
+      final payStatus = (data['paymentStatus'] ?? '').toString().toUpperCase();
+
+      if ((payMethod == 'ONLINE' || payGateway == 'RAZORPAY') && (payStatus == 'PAID' || payStatus == 'SUCCESS')) {
+        final double totalAmt = (data['totalAmount'] is num)
+            ? (data['totalAmount'] as num).toDouble()
+            : (data['grandTotal'] is num ? (data['grandTotal'] as num).toDouble() : 0.0);
+
+        updates['refundStatus'] = 'PROCESSING';
+        updates['refundAmount'] = totalAmt;
+        updates['refundMessage'] = 'Your refund of ₹${totalAmt.toStringAsFixed(2)} has been initiated. It may take 2–4 business days to reflect in your original payment method.';
+      } else {
+        updates['refundStatus'] = 'NOT_APPLICABLE';
+        updates['refundAmount'] = 0.0;
+      }
+
+      await docRef.update(updates);
+
+      // Restore any redeemed reward points on order cancellation
+      try {
+        final custId = (data['customerId'] ?? data['userId'] ?? '').toString();
+        final orderNum = (data['orderNumber'] ?? orderId).toString();
+        final int redeemedPts = (data['rewardPointsUsed'] is num)
+            ? (data['rewardPointsUsed'] as num).toInt()
+            : int.tryParse(data['rewardPointsUsed']?.toString() ?? '0') ?? 0;
+
+        if (redeemedPts > 0 && custId.isNotEmpty) {
+          final userRef = _firestore.collection('users').doc(custId);
+          final resTxRef = _firestore.collection('reward_transactions').doc();
+          final userSnap = await userRef.get();
+          final currentPts = userSnap.exists
+              ? (userSnap.data()?['rewardPoints'] is num
+                  ? (userSnap.data()?['rewardPoints'] as num).toInt()
+                  : int.tryParse(userSnap.data()?['rewardPoints']?.toString() ?? '0') ?? 0)
+              : 0;
+
+          final newBal = currentPts + redeemedPts;
+          await resTxRef.set({
+            'id': resTxRef.id,
+            'transactionId': resTxRef.id,
+            'userId': custId,
+            'customerId': custId,
+            'orderId': orderId,
+            'orderNumber': orderNum,
+            'points': redeemedPts,
+            'monetaryValue': data['rewardDiscountAmount'] ?? 0,
+            'restaurantId': data['restaurantId'] ?? '',
+            'branchId': data['branchId'] ?? '',
+            'type': 'REFUNDED',
+            'transactionType': 'REFUNDED',
+            'remainingBalance': newBal,
+            'description': 'Restored $redeemedPts redeemed points for cancelled Order #$orderNum',
+            'createdAt': nowIso,
+            'timestamp': nowIso,
+          });
+
+          await userRef.set({
+            'rewardPoints': FieldValue.increment(redeemedPts),
+            'updatedAt': nowIso,
+          }, SetOptions(merge: true));
+        }
+      } catch (err) {
+        debugPrint('Reward point cancellation reversal notice: $err');
+      }
+
+      // Create notification record for admins/managers
+      try {
+        final notifRef = _firestore.collection('notifications').doc();
+        await notifRef.set({
+          'id': notifRef.id,
+          'orderId': orderId,
+          'branchId': data['branchId'],
+          'restaurantId': data['restaurantId'],
+          'title': 'Order Cancelled ⚠️',
+          'body': 'Order #${data['orderNumber'] ?? orderId} was cancelled by ${cancelledBy.replaceAll('_', ' ')}. Reason: $cancellationReason',
+          'type': 'order_cancelled',
+          'targetRole': 'BRANCH_MANAGER',
+          'read': false,
+          'createdAt': nowIso,
+        });
+      } catch (e) {
+        debugPrint('Cancellation notification warning: $e');
+      }
+
+      return {'success': true};
+    } catch (e) {
+      return {'success': false, 'message': 'Failed to cancel order: $e'};
+    }
+  }
+
+  /// Hide an order from customer's visible order history without deleting backend record
+  Future<bool> hideOrderFromUserHistory(String orderId) async {
+    try {
+      await _firestore.collection(_collectionName).doc(orderId).update({
+        'hiddenForUser': true,
+        'updatedAt': DateTime.now().toIso8601String(),
+      });
+      return true;
+    } catch (e) {
+      debugPrint('[OrderRepository] hideOrderFromUserHistory error: $e');
+      return false;
+    }
+  }
+}
+
